@@ -13,6 +13,30 @@
 
 ---
 
+## When to use SupaLite
+
+SupaLite is a curated subset of the Supabase stack for indie developers
+self-hosting a small project on a single VPS — keep what most apps
+actually use, drop what they don't.
+
+|                                            | Supabase Cloud                                   | Full self-hosted Supabase           | **SupaLite**                       |
+|--------------------------------------------|--------------------------------------------------|-------------------------------------|------------------------------------|
+| **Setup**                                  | Sign up                                          | 11+ containers, hand-wired          | One command                        |
+| **Services**                               | DB + Auth + Storage + Edge + Realtime + Studio   | Same                                | DB + Auth + Studio                 |
+| **Day-2 admin** (backups, secrets, logs)   | Built-in dashboard                               | DIY (`docker exec`, scripts)        | Built-in admin panel               |
+| **Hosting**                                | Supabase's infra                                 | Your VPS                            | Your VPS                           |
+| **Cost floor**                             | Free → $25/mo paid                               | VPS ($5–10/mo) + your time          | VPS ($5–10/mo)                     |
+| **Need Storage / Edge Functions / Realtime?** | ✅                                              | ✅                                   | ❌ — use one of the others         |
+
+**Pick Supabase Cloud** if you want zero ops and don't mind the vendor.
+**Pick full self-hosted Supabase** if you need the whole stack
+(Storage, Edge Functions, Realtime).
+**Pick SupaLite** if your app is just Postgres + Auth + a frontend,
+you want the data on your own host, and you don't want to babysit 11
+containers.
+
+---
+
 ## One-line install
 
 ```bash
