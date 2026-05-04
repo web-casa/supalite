@@ -1,0 +1,302 @@
+# Pin the compose project name so containers get predictable labels
+# (`com.docker.compose.project=supalite`) regardless of what operators
+# name their checkout directory. Admin's Docker client uses this to
+# discover peer containers.
+name: supalite
+
+services:
+  # ─── PostgreSQL ────────────────────────────────────────────
+  # Uses supabase/postgres image which auto-creates 12 Supabase roles
+  # (anon, authenticated, service_role, authenticator, supabase_admin,
+  #  supabase_auth_admin, supabase_storage_admin,
+  #  supabase_replication_admin, supabase_read_only_user,
+  #  dashboard_user, postgres, pgbouncer) and schemas (auth, storage,
+  #  extensions, realtime, pgbouncer).
+  # Note: supabase_functions_admin is created later by pg_net extension's
+  # event trigger. supabase_etl_admin is only in newer images (> 15.8.1.085).
+  # Our 99-supabase-lite-custom.sh runs after the image's init to:
+  #  - set all role passwords to POSTGRES_PASSWORD
+  #  - override auth.uid()/role()/email() for new GUC mode
+  #  - create _realtime and supabase_functions schemas
+  #  - enable 8 core extensions (pg_graphql, pgvector, etc.)
+  db:
+    # Custom image = supabase/postgres + pgbackrest binary (Phase 6.2).
+    # Adds ~5 MB; pgbackrest is only invoked if PGBACKREST_ARCHIVE_MODE=on.
+    # DB_IMAGE defaults to the upstream GHCR image; if that fails to pull
+    # (e.g. offline, forked to a private registry), compose falls back to
+    # building from ./volumes/db thanks to the `build` directive below.
+    image: ${DB_IMAGE:-ghcr.io/web-casa/supalite-db:latest}
+    build: ./volumes/db
+    restart: unless-stopped
+    # Bind to loopback only by default. Override POSTGRES_BIND_ADDR=0.0.0.0
+    # in .env to expose the database externally.
+    ports:
+      - "${POSTGRES_BIND_ADDR:-127.0.0.1}:5432:5432"
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXP: ${JWT_EXP:-3600}
+      # pgBackRest reads these to render /etc/pgbackrest/pgbackrest.conf
+      # at container start (see volumes/db/pgbackrest-entrypoint.sh).
+      # They are the SAME values the admin uses for pg_dump backups.
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      BACKUP_S3_REGION: ${BACKUP_S3_REGION:-us-east-1}
+      BACKUP_S3_ACCESS_KEY: ${BACKUP_S3_ACCESS_KEY:-}
+      BACKUP_S3_SECRET_KEY: ${BACKUP_S3_SECRET_KEY:-}
+      BACKUP_S3_PATH_STYLE: ${BACKUP_S3_PATH_STYLE:-false}
+      BACKUP_S3_PGBACKREST_PATH: ${BACKUP_S3_PGBACKREST_PATH:-/pgbackrest}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      # Mount as single file (NOT directory) to avoid overwriting the image's
+      # migrate.sh. The "zz-" prefix ensures our script runs AFTER the image's
+      # migrate.sh (alphabetical order in docker-entrypoint-initdb.d/).
+      - ./volumes/db/init/zz-supalite.sh:/docker-entrypoint-initdb.d/zz-supalite.sh:ro
+    command:
+      - postgres
+      - -c
+      - listen_addresses=*
+      - -c
+      - max_connections=200
+      - -c
+      - shared_preload_libraries=pg_stat_statements,pg_cron,pg_net,supautils
+      - -c
+      - cron.database_name=postgres
+      # WAL archiving for pgBackRest. Default off — flip via .env when
+      # enabling. archive_mode is postmaster-level (requires restart).
+      - -c
+      - archive_mode=${PGBACKREST_ARCHIVE_MODE:-off}
+      - -c
+      # Default is the pgbackrest push command: when archive_mode is on
+      # without a configured stanza, this fails loudly — operator sees
+      # archive errors in logs — rather than silently no-op'ing WAL.
+      - archive_command=${PGBACKREST_ARCHIVE_COMMAND:-pgbackrest --stanza=main archive-push %p}
+      - -c
+      - wal_level=${PGBACKREST_WAL_LEVEL:-replica}
+      - -c
+      - max_wal_senders=${PGBACKREST_MAX_WAL_SENDERS:-3}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U supabase_admin -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ─── PostgREST (auto REST API) ────────────────────────────
+  rest:
+    image: postgrest/postgrest:v14.8
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/postgres
+      PGRST_DB_SCHEMAS: public,graphql_public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
+      PGRST_APP_SETTINGS_JWT_EXP: ${JWT_EXP:-3600}
+      PGRST_DB_MAX_ROWS: ${PGRST_DB_MAX_ROWS:-1000}
+      PGRST_DB_EXTRA_SEARCH_PATH: public,extensions
+
+  # ─── GoTrue (Auth) ────────────────────────────────────────
+  # Connects as supabase_auth_admin (owns auth schema only), not supabase_admin.
+  gotrue:
+    image: supabase/gotrue:v2.186.0
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: ${API_EXTERNAL_URL}
+      GOTRUE_SITE_URL: ${SITE_URL}
+      # Additional allowed redirect targets for OAuth / magic-link flows.
+      # Comma-separated list of URLs (or URL prefixes). SITE_URL is
+      # already implicitly allowed; use this for extra frontends that
+      # share this auth backend (e.g. mobile deep links, marketing site).
+      GOTRUE_URI_ALLOW_LIST: ${GOTRUE_URI_ALLOW_LIST:-}
+
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/postgres?sslmode=disable
+
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_JWT_EXP: ${JWT_EXP:-3600}
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+
+      # Anonymous access
+      GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: ${GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED}
+
+      # Signup
+      GOTRUE_DISABLE_SIGNUP: ${GOTRUE_DISABLE_SIGNUP}
+
+      # Email / SMTP
+      GOTRUE_SMTP_HOST: ${GOTRUE_SMTP_HOST}
+      GOTRUE_SMTP_PORT: ${GOTRUE_SMTP_PORT}
+      GOTRUE_SMTP_USER: ${GOTRUE_SMTP_USER}
+      GOTRUE_SMTP_PASS: ${GOTRUE_SMTP_PASS}
+      GOTRUE_SMTP_ADMIN_EMAIL: ${GOTRUE_SMTP_ADMIN_EMAIL}
+      GOTRUE_MAILER_AUTOCONFIRM: ${GOTRUE_MAILER_AUTOCONFIRM}
+      GOTRUE_MAILER_URLPATHS_CONFIRMATION: /auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_RECOVERY: /auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_INVITE: /auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE: /auth/v1/verify
+
+      # OAuth — GitHub
+      GOTRUE_EXTERNAL_GITHUB_ENABLED: ${GOTRUE_EXTERNAL_GITHUB_ENABLED}
+      GOTRUE_EXTERNAL_GITHUB_CLIENT_ID: ${GOTRUE_EXTERNAL_GITHUB_CLIENT_ID}
+      GOTRUE_EXTERNAL_GITHUB_SECRET: ${GOTRUE_EXTERNAL_GITHUB_SECRET}
+      GOTRUE_EXTERNAL_GITHUB_REDIRECT_URI: ${GOTRUE_EXTERNAL_GITHUB_REDIRECT_URI}
+
+      # OAuth — Google
+      GOTRUE_EXTERNAL_GOOGLE_ENABLED: ${GOTRUE_EXTERNAL_GOOGLE_ENABLED}
+      GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID: ${GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID}
+      GOTRUE_EXTERNAL_GOOGLE_SECRET: ${GOTRUE_EXTERNAL_GOOGLE_SECRET}
+      GOTRUE_EXTERNAL_GOOGLE_REDIRECT_URI: ${GOTRUE_EXTERNAL_GOOGLE_REDIRECT_URI}
+
+      # OAuth — Apple
+      GOTRUE_EXTERNAL_APPLE_ENABLED: ${GOTRUE_EXTERNAL_APPLE_ENABLED}
+      GOTRUE_EXTERNAL_APPLE_CLIENT_ID: ${GOTRUE_EXTERNAL_APPLE_CLIENT_ID}
+      GOTRUE_EXTERNAL_APPLE_SECRET: ${GOTRUE_EXTERNAL_APPLE_SECRET}
+      GOTRUE_EXTERNAL_APPLE_REDIRECT_URI: ${GOTRUE_EXTERNAL_APPLE_REDIRECT_URI}
+
+  # ─── Admin Panel ───────────────────────────────────────────
+  admin:
+    # ADMIN_IMAGE defaults to the upstream GHCR image; if the pull fails
+    # compose falls back to `build: ./admin` below. Forks that publish to
+    # a different registry override ADMIN_IMAGE in .env.
+    image: ${ADMIN_IMAGE:-ghcr.io/web-casa/supalite-admin:latest}
+    build: ./admin
+    restart: unless-stopped
+    environment:
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      COOKIE_SIGNING_KEY: ${COOKIE_SIGNING_KEY}
+      API_EXTERNAL_URL: ${API_EXTERNAL_URL}
+      ENV_FILE: /project/.env
+      DATABASE_URL: postgres://supabase_admin:${POSTGRES_PASSWORD}@db:5432/postgres?sslmode=disable
+      LISTEN_ADDR: ":9100"
+      COMPOSE_PROJECT_NAME: supalite
+      HOST_PROJECT_DIR: ${HOST_PROJECT_DIR:-${PWD}}
+      # Backup — S3 target for pg_dump (Phase 6.1). Values are edited
+      # through the Settings UI; compose passes them into the container.
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      BACKUP_S3_REGION: ${BACKUP_S3_REGION:-}
+      BACKUP_S3_ACCESS_KEY: ${BACKUP_S3_ACCESS_KEY:-}
+      BACKUP_S3_SECRET_KEY: ${BACKUP_S3_SECRET_KEY:-}
+      BACKUP_S3_PATH_STYLE: ${BACKUP_S3_PATH_STYLE:-false}
+      BACKUP_S3_PREFIX: ${BACKUP_S3_PREFIX:-backup/}
+      # Scheduled-backup loop (Phase V0.2). Empty/0 = off.
+      BACKUP_SCHEDULE_HOURS: ${BACKUP_SCHEDULE_HOURS:-}
+      BACKUP_RETENTION_COUNT: ${BACKUP_RETENTION_COUNT:-}
+    working_dir: /project
+    volumes:
+      - ./:/project
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # ─── postgres-meta (Studio backend) ─────────────────────────
+  # REST wrapper over PostgreSQL metadata. Only used by Studio.
+  # Enabled via COMPOSE_PROFILES=studio in .env (see docs §7).
+  meta:
+    image: supabase/postgres-meta:v0.96.3
+    restart: unless-stopped
+    profiles: [studio]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: db
+      PG_META_DB_PORT: 5432
+      PG_META_DB_NAME: postgres
+      PG_META_DB_USER: supabase_admin
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      CRYPTO_KEY: ${PG_META_CRYPTO_KEY}
+
+  # ─── Supabase Studio ────────────────────────────────────────
+  # Official Supabase UI (table editor, SQL editor, auth, etc.)
+  # Storage/Edge/Realtime menus hidden via NEXT_PUBLIC_DISABLED_FEATURES.
+  studio:
+    image: supabase/studio:2026.04.08-sha-205cbe7
+    restart: unless-stopped
+    profiles: [studio]
+    depends_on:
+      meta:
+        condition: service_started
+    environment:
+      HOSTNAME: 0.0.0.0
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PG_META_CRYPTO_KEY: ${PG_META_CRYPTO_KEY}
+      PGRST_DB_SCHEMAS: public,graphql_public
+      PGRST_DB_MAX_ROWS: ${PGRST_DB_MAX_ROWS:-1000}
+
+      DEFAULT_ORGANIZATION_NAME: ${STUDIO_DEFAULT_ORGANIZATION:-Default Organization}
+      DEFAULT_PROJECT_NAME: ${STUDIO_DEFAULT_PROJECT:-Default Project}
+
+      # Internal URL (Studio SSR calls this) + public URL (sent to browser).
+      SUPABASE_URL: http://gateway:8000
+      SUPABASE_PUBLIC_URL: ${API_EXTERNAL_URL}
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      AUTH_JWT_SECRET: ${JWT_SECRET}
+
+      # Hide menus for services we don't ship.
+      # Note: project_auth:all is NOT in this list — GoTrue IS installed.
+      NEXT_PUBLIC_DISABLED_FEATURES: "project_storage:all,project_edge_function:all,realtime:all"
+      NEXT_PUBLIC_ENABLE_LOGS: "false"
+
+  # ─── Caddy (API Gateway) ──────────────────────────────────
+  gateway:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - rest
+      - gotrue
+      - admin
+    ports:
+      # Default: http-only on :8000, bound to all interfaces.
+      # HTTPS (:80/:443) is opt-in via docker-compose.https.yml — see
+      # that file and the HTTPS section of .env.example.
+      - "${GATEWAY_HTTP_BIND:-}:8000:8000"
+    environment:
+      ANON_KEY: ${ANON_KEY}
+      SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      SITE_URL: ${SITE_URL}
+      # Address the Caddyfile's site block listens on. Default `:8000`
+      # keeps http-only behavior; change to a domain (e.g. db.example.com)
+      # for auto-HTTPS via Let's Encrypt.
+      CADDY_SITE_ADDR: ${CADDY_SITE_ADDR:-:8000}
+      # Regex of allowed CORS origins. Default falls back to SITE_URL
+      # (regex metachars unescaped; fine for real browser origins).
+      # Admin panel's Settings → General writes this as a regex
+      # alternation built from a user-friendly one-per-line list.
+      CORS_ALLOWED_ORIGINS_REGEX: ${CORS_ALLOWED_ORIGINS_REGEX:-${SITE_URL}}
+    volumes:
+      - ./volumes/api/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./volumes/api/www:/srv/www:ro
+      # Cert + ACME state persisted so renewals survive container restarts.
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  # External reference if you're migrating from the old `supabase-lite`
+  # project name. Unset this and let compose create a fresh volume for
+  # new installs.
+  db-data:
+    name: ${DB_DATA_VOLUME:-supalite_db-data}
+    external: ${DB_DATA_VOLUME_EXTERNAL:-false}
+  # Caddy writes issued certs, ACME account keys, and OCSP staples here.
+  # Wiped = refetched on next restart (Let's Encrypt rate limits apply).
+  caddy-data:
+  caddy-config:

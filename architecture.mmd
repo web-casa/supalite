@@ -1,0 +1,74 @@
+graph TB
+    subgraph Client["客户端"]
+        Web["Web App / Mobile App"]
+        SDK["supabase-js SDK"]
+    end
+
+    Web --> SDK
+
+    subgraph Gateway["Caddy 网关 :8000"]
+        direction TB
+        SEC["安全层<br/>API Key 验证<br/>CORS 白名单<br/>安全 Headers"]
+        ROUTE_AUTH["/auth/v1/*"]
+        ROUTE_REST["/rest/v1/*"]
+    end
+
+    SDK -->|"apikey + JWT"| SEC
+    SEC --> ROUTE_AUTH
+    SEC --> ROUTE_REST
+
+    subgraph Services["核心服务"]
+        GOTRUE["GoTrue<br/>Auth 服务<br/>:9999"]
+        POSTGREST["PostgREST<br/>自动 REST API<br/>:3000"]
+    end
+
+    ROUTE_AUTH --> GOTRUE
+    ROUTE_REST --> POSTGREST
+
+    subgraph Auth_Features["GoTrue 能力"]
+        direction LR
+        EMAIL["邮箱/密码"]
+        ANON["匿名访问"]
+        OAUTH["OAuth<br/>GitHub / Google / Apple"]
+    end
+
+    GOTRUE --- Auth_Features
+
+    subgraph Database["PostgreSQL :5432"]
+        direction TB
+        PG["Postgres 15"]
+        AUTH_SCHEMA["auth schema<br/>用户表 / 会话"]
+        PUBLIC_SCHEMA["public schema<br/>业务表"]
+        RLS["RLS 策略<br/>auth.uid() / auth.role()"]
+        EXT["扩展<br/>uuid-ossp / pgcrypto / pgjwt"]
+    end
+
+    GOTRUE -->|"supabase_admin"| AUTH_SCHEMA
+    POSTGREST -->|"authenticator → anon/authenticated"| PUBLIC_SCHEMA
+    PUBLIC_SCHEMA --- RLS
+    PG --- AUTH_SCHEMA
+    PG --- PUBLIC_SCHEMA
+    PG --- EXT
+
+    subgraph Roles["PostgreSQL 角色"]
+        direction LR
+        R_ANON["anon<br/>未登录用户"]
+        R_AUTH["authenticated<br/>已登录用户"]
+        R_SERVICE["service_role<br/>绕过 RLS"]
+    end
+
+    RLS -.- Roles
+
+    classDef gateway fill:#f59e0b,stroke:#d97706,color:#000
+    classDef service fill:#3b82f6,stroke:#2563eb,color:#fff
+    classDef db fill:#10b981,stroke:#059669,color:#fff
+    classDef client fill:#8b5cf6,stroke:#7c3aed,color:#fff
+    classDef feature fill:#f3f4f6,stroke:#9ca3af,color:#000
+    classDef role fill:#fef3c7,stroke:#f59e0b,color:#000
+
+    class Gateway,SEC,ROUTE_AUTH,ROUTE_REST gateway
+    class GOTRUE,POSTGREST service
+    class Database,PG,AUTH_SCHEMA,PUBLIC_SCHEMA,RLS,EXT db
+    class Client,Web,SDK client
+    class Auth_Features,EMAIL,ANON,OAUTH feature
+    class Roles,R_ANON,R_AUTH,R_SERVICE role

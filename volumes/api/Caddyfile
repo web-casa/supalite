@@ -1,0 +1,158 @@
+{
+	# Global options
+	admin off
+	# auto_https is Caddy's default (on). Bare-port site blocks like
+	# `:8000` don't trigger cert provisioning anyway, so keeping the
+	# default costs nothing in the default "http-only localhost" setup.
+	# When operators switch CADDY_SITE_ADDR to a domain (e.g. `db.example.com`),
+	# Caddy transparently provisions a Let's Encrypt cert over port 80
+	# (HTTP-01 challenge) — port 80/443 must be reachable from the internet.
+}
+
+(cors) {
+	# {args[0]} is a regex alternation, e.g.
+	#   https?://localhost(:\d+)?|https://myapp\.com|https://admin\.myapp\.com
+	# On match, echo the request's Origin back in ACAO (cannot use "*"
+	# because browsers reject that combined with credentials).
+	@allowed_origin header_regexp Origin "^({args[0]})$"
+	header @allowed_origin Access-Control-Allow-Origin "{http.request.header.Origin}"
+	header @allowed_origin Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+	header @allowed_origin Access-Control-Allow-Headers "Authorization, apikey, Content-Type, Accept, x-client-info"
+	header @allowed_origin Access-Control-Max-Age "3600"
+	# Vary: Origin so caches don't serve the wrong origin's CORS headers
+	# to a different caller.
+	header @allowed_origin Vary "Origin"
+
+	@preflight method OPTIONS
+	handle @preflight {
+		respond "" 204
+	}
+}
+
+(require_apikey) {
+	# Reject requests whose apikey/Authorization header doesn't match
+	# either ANON_KEY or SERVICE_ROLE_KEY exactly.
+	# The apikey header is mandatory — a user's per-session JWT still
+	# needs to be paired with the anon apikey (standard Supabase pattern).
+	@no_apikey {
+		not header apikey {$ANON_KEY}
+		not header apikey {$SERVICE_ROLE_KEY}
+	}
+	handle @no_apikey {
+		respond "Missing or invalid API key" 401
+	}
+}
+
+# Note on /studio/* cookie gating (below):
+# Presence check only — we don't verify HMAC at gateway level because Caddy
+# doesn't have our signing key. If someone bypasses with a fake cookie, Studio
+# loads, but its API calls still hit PostgREST/GoTrue/postgres-meta which
+# validate keys independently. The cookie gate is mostly UX (redirect to login
+# for unauthenticated users), not a hard security boundary.
+
+# Site address driven by env (default set in docker-compose.yml to `:8000`).
+# Override in .env with a domain to enable auto-HTTPS, e.g.
+#   CADDY_SITE_ADDR=db.example.com
+# Caddy then provisions + renews a Let's Encrypt cert automatically.
+# Avoid the Caddyfile `{$VAR:default}` syntax here because Caddy parses
+# the default on the first colon, making `:8000` ambiguous.
+{$CADDY_SITE_ADDR} {
+	# ── Security headers ──
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# ── CORS ──
+	# CORS_ALLOWED_ORIGINS_REGEX is a regex alternation of allowed origins,
+	# produced by the admin panel (takes a one-per-line list, regex-escapes
+	# each, joins with `|`). Backward-compat default = SITE_URL (not
+	# escaped, so literal dots match any char — benign for real browsers).
+	import cors {$CORS_ALLOWED_ORIGINS_REGEX}
+
+	# ── Auth endpoints — GoTrue ──
+	# GoTrue serves routes at root (e.g. /signup, /token). Strip the
+	# /auth/v1 prefix before forwarding.
+	handle /auth/v1/* {
+		uri strip_prefix /auth/v1
+		reverse_proxy gotrue:9999
+	}
+
+	# OAuth well-known endpoint (GoTrue emits it at root).
+	handle /.well-known/oauth-authorization-server {
+		reverse_proxy gotrue:9999
+	}
+
+	# ── REST API — requires apikey header ──
+	handle /rest/v1/* {
+		import require_apikey
+		uri strip_prefix /rest/v1
+		reverse_proxy rest:3000
+	}
+
+	# ── GraphQL — routes to PostgREST's rpc/graphql (pg_graphql extension) ──
+	# Client sends /graphql/v1, we rewrite to /rpc/graphql and add the
+	# Content-Profile header so PostgREST knows to use graphql_public schema.
+	handle /graphql/v1* {
+		import require_apikey
+		rewrite * /rpc/graphql
+		reverse_proxy rest:3000 {
+			header_up Content-Profile graphql_public
+		}
+	}
+
+	# ── Supabase Studio (only up if COMPOSE_PROFILES=studio) ──
+	# Gated on cookie presence; if missing, redirect to /admin/ for login.
+	# Strip /studio prefix — Studio's Next.js app serves at root, not /studio.
+	# Cookie regex anchored to cookie boundary — prevents substring bypasses
+	# like `Cookie: other_sbl_auth=x` matching "sbl_auth=".
+	@studio_no_cookie {
+		path /studio /studio/*
+		not header_regexp Cookie "(^|; ?)sbl_auth="
+	}
+	redir @studio_no_cookie /admin/ 302
+
+	handle /studio/* {
+		uri strip_prefix /studio
+		reverse_proxy studio:3000
+	}
+	handle /studio {
+		redir /studio/ permanent
+	}
+
+	# ── Admin panel ──
+	handle /admin/* {
+		uri strip_prefix /admin
+		# Strict CSP blocks external scripts that might steal the login token.
+		# Next.js 16 static export emits multiple inline bootstrap/hydration
+		# <script> tags; 'unsafe-inline' for script-src is required to load
+		# the SPA. The admin panel never renders user-supplied HTML, so the
+		# XSS surface 'unsafe-inline' would normally expose is minimal here.
+		# All the other CSP directives stay tight.
+		header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+		reverse_proxy admin:9100
+	}
+	handle /admin {
+		redir /admin/ permanent
+	}
+
+	# ── Health check ──
+	handle /health {
+		respond "OK" 200
+	}
+
+	# ── Homepage (landing / selector page) ──
+	# Served from a simple HTML file baked into Caddy volume.
+	handle / {
+		root * /srv/www
+		rewrite * /index.html
+		file_server
+		header Content-Type "text/html; charset=utf-8"
+	}
+
+	handle {
+		respond "supabase-lite is running" 200
+	}
+}

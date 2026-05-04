@@ -1,0 +1,72 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Go (admin)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: admin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: admin/go.sum
+      # `go vet` and `go build` must run from `admin/` — not `admin/web/`
+      # which is the Next.js project and has no Go code (a soft-pass trap
+      # we've hit before).
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test ./... -count=1
+
+  frontend:
+    name: Next.js (admin/web)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: admin/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: admin/web/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  compose:
+    name: docker compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fabricate a minimal .env
+        # compose's `${VAR:-default}` substitution covers most fields;
+        # only a handful have no default and need to be set.
+        run: |
+          cat > .env <<'EOF'
+          POSTGRES_PASSWORD=ci-password
+          JWT_SECRET=ci-jwt-secret-0000000000000000000000000000000000000000000000000000
+          ADMIN_TOKEN=ci-admin-token
+          COOKIE_SIGNING_KEY=ci-cookie-key-32-bytes-0000000000
+          PG_META_CRYPTO_KEY=ci-pgmeta-key
+          ANON_KEY=ci-anon
+          SERVICE_ROLE_KEY=ci-service
+          SITE_URL=http://localhost:3000
+          API_EXTERNAL_URL=http://localhost:8000
+          HOST_PROJECT_DIR=/tmp/project
+          EOF
+      - name: Default compose renders
+        run: docker compose config --quiet
+      - name: HTTPS override renders
+        run: docker compose -f docker-compose.yml -f docker-compose.https.yml config --quiet

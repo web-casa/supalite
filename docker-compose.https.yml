@@ -1,0 +1,19 @@
+# Compose override that publishes :80 and :443 for gateway auto_https.
+#
+# Opt-in. Use with:
+#   docker compose -f docker-compose.yml -f docker-compose.https.yml up -d
+#
+# Kept separate from the main compose file so a plain `docker compose up`
+# doesn't silently try to bind those ports on the host — which breaks
+# upgrades for users who already run something on :80/:443.
+#
+# Required for Let's Encrypt HTTP-01 challenge (:80) and TLS serving
+# (:443). CADDY_HTTPS_BIND defaults to empty (0.0.0.0 all interfaces)
+# because that's what ACME needs; override to 127.0.0.1 if you
+# terminate TLS at an upstream load balancer.
+
+services:
+  gateway:
+    ports:
+      - "${CADDY_HTTPS_BIND:-}:80:80"
+      - "${CADDY_HTTPS_BIND:-}:443:443"

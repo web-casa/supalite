@@ -1,0 +1,44 @@
+---
+title: SupaLite
+description: One-command self-hosted Postgres + Auth + Studio for indie developers.
+template: splash
+hero:
+  tagline: Self-hosted Postgres + Auth + Studio. One command. No moving parts you don't need.
+  actions:
+    - text: Quick Start
+      link: /supalite/getting-started/quick-start/
+      icon: right-arrow
+      variant: primary
+    - text: GitHub
+      link: https://github.com/web-casa/supalite
+      icon: external
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Three minutes to a usable database
+
+```bash
+git clone https://github.com/web-casa/supalite.git
+cd supalite
+./setup.sh
+```
+
+That's it. `./setup.sh` generates all secrets, starts the stack, and prints your admin token. Open [http://localhost:8000/admin/](http://localhost:8000/admin/).
+
+## Why SupaLite?
+
+<CardGrid stagger>
+  <Card title="One-command setup" icon="rocket">
+    `./setup.sh` generates secrets, starts the stack, prints your admin token. Three minutes from `git clone` to a usable database.
+  </Card>
+  <Card title="Just the necessities" icon="puzzle">
+    Postgres + PostgREST + GoTrue + Studio. No Storage, no Edge Functions, no Realtime — features most small deployments don't need.
+  </Card>
+  <Card title="Day-2 admin" icon="setting">
+    Browser-based admin panel for backups, secret rotation, log tailing, session inspection, and DB maintenance. No `kubectl exec` rabbit holes.
+  </Card>
+  <Card title="Indie-friendly" icon="heart">
+    Multi-frontend CORS, scheduled backups with retention, opt-in HTTPS via Let's Encrypt. Designed for one operator on one VPS.
+  </Card>
+</CardGrid>

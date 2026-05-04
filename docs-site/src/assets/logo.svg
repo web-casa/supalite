@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" fill="none">
+  <!-- Stylized "SL" mark using SupaLite green. The angled cut evokes
+       a database stripe / accent. -->
+  <rect x="0" y="0" width="32" height="32" rx="6" fill="#3ECF8E"/>
+  <path d="M9 9 h10 a4 4 0 0 1 4 4 v6 a4 4 0 0 1 -4 4 h-10 v-3 h10 a1 1 0 0 0 1 -1 v-6 a1 1 0 0 0 -1 -1 h-10 z" fill="#0a1f15"/>
+  <rect x="9" y="20" width="14" height="3" fill="#0a1f15"/>
+</svg>

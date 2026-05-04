@@ -1,0 +1,11 @@
+/* SupaLite brand: green from the admin panel (Supabase brand green). */
+:root {
+  --sl-color-accent-low: #0e3a26;
+  --sl-color-accent: #2bb87a;
+  --sl-color-accent-high: #c4f1de;
+}
+:root[data-theme="light"] {
+  --sl-color-accent-low: #c4f1de;
+  --sl-color-accent: #189659;
+  --sl-color-accent-high: #0e3a26;
+}
