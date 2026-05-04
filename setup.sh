@@ -238,8 +238,11 @@ step "启动服务"
 
 cd "$SCRIPT_DIR"
 
-info "拉取镜像..."
-docker compose pull
+info "拉取镜像 (本地构建的 db / admin 镜像若 registry 不存在会被跳过)..."
+docker compose pull --ignore-pull-failures 2>/dev/null || true
+
+info "构建本地镜像 (db, admin)..."
+docker compose build
 
 info "启动容器..."
 docker compose up -d
