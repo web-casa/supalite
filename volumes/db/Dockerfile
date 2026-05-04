@@ -34,12 +34,10 @@ RUN chmod +x /usr/local/bin/pgbackrest-entrypoint.sh \
 
 COPY pgbackrest.conf.template /etc/pgbackrest/pgbackrest.conf.template
 
-# supabase/postgres's Dockerfile ends with USER postgres; we restore
-# that here after our root-scoped RUN above. Removing this would leave
-# the image running as root, breaking Postgres's own process-UID
-# expectations. The upstream docker-entrypoint.sh handles being
-# invoked as either root (drops to postgres via gosu) or postgres.
-USER postgres
-
+# Stay as root so the upstream docker-entrypoint.sh can chown
+# /var/lib/postgresql/data on first start, then gosu-drop to the
+# postgres user before exec'ing postgres. Setting USER postgres here
+# skips that fix-up and initdb fails with "could not change
+# permissions of directory" on a fresh named volume.
 ENTRYPOINT ["/usr/local/bin/pgbackrest-entrypoint.sh"]
 # Default CMD inherited from supabase/postgres (postgres with its args).
